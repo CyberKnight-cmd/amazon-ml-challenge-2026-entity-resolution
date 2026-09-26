@@ -36,7 +36,8 @@ params = json.loads((WORK / "decode_params.json").read_text()) if (WORK / "decod
 t, gap, guard = (params.get("threshold") or [0.7, 0.2, 0.0])
 t, gap, guard = (a.t if a.t is not None else t), (a.gap if a.gap is not None else gap), (a.guard if a.guard is not None else guard)
 mu0 = a.mu0 if a.mu0 is not None else params.get("mu0", 0.1)
-UNSEEN = {"France"}  # countries not present in train (verified in docs/01)
+# country is an open set: anything absent from the training S1 counts as unseen (no hard-coded names)
+UNSEEN = set(load_normalized("test", 1)["country"].unique().to_list()) - set(load_normalized("train", 1)["country"].unique().to_list())
 
 s1 = load_normalized("test", 1)
 countries = s1["country"].unique().sort().to_list()

@@ -21,8 +21,8 @@ ap.add_argument("--tau", type=float, required=True)
 ap.add_argument("--tag", default="")
 ap.add_argument("--unseen_tau", type=float, default=None, help="stricter threshold for countries absent from train")
 ap.add_argument("--out", default=str(ROOT / "outputs" / "submission" / "matching_results.tsv"))
+ap.add_argument("--cand_out", default=str(ROOT / "outputs" / "submission" / "candidate_pairs.tsv"))
 a = ap.parse_args()
-UNSEEN = {"France"}
 
 model = lgb.Booster(model_file=str(WORK / f"s2_model{a.tag}.txt"))
 feats = json.loads((WORK / f"s2_features{a.tag}.json").read_text())
@@ -31,9 +31,14 @@ tables = [pickle.load(open(chan, "rb"))] if chan.exists() else None
 
 s1 = load_normalized("test", 1)
 countries = s1["country"].unique().sort().to_list()
+# country is an open set: anything absent from the training S1 is "unseen" (no hard-coded names)
+UNSEEN = set(countries) - set(load_normalized("train", 1)["country"].unique().to_list())
+print("countries:", countries, "unseen in train:", sorted(UNSEEN))
+cand_all = []
 acc_all, best_all = [], {}
 for c in countries:
     df = pl.read_parquet(WORK / f"s2_test_{c}.parquet")
+    cand_all.append(df.select("q_id", "s1_id"))  # exactly the pairs the final model runs inference over
     if tables is not None:
         ch = channel.features(df["n1"].to_list(), df["n2"].to_list(), df["a1"].to_list(), df["a2"].to_list(), tables)
         df = pl.concat([df, ch], how="horizontal")
@@ -51,6 +56,13 @@ write_submission(out, dest)
 raw = dest.read_bytes()
 assert b'"' not in raw, "quote character in submission file (empty lists must be truly empty)"
 assert raw.startswith(b"source1_entity_id\tmatched_entity_ids\n"), "unexpected header"
+
+cand = pl.concat(cand_all)
+csub = assemble(s1.select("id"), cand).rename({"matched_entity_ids": "candidate_entity_ids"})
+Path(a.cand_out).parent.mkdir(parents=True, exist_ok=True)
+csub.select("source1_entity_id", "candidate_entity_ids").write_csv(a.cand_out, separator="\t", quote_style="never")
+print(f"candidates written: {a.cand_out}  pairs={cand.height:,}  per S1 entity={cand.height / s1.height:.2f}")
+assert acc.join(cand, on=["q_id", "s1_id"], how="anti").height == 0, "a match that is not a candidate"
 
 q_total = pl.concat([load_normalized("test", s).select("id", "country") for s in (2, 3)])
 print(f"\ndecoder=stage2  written: {dest}")
