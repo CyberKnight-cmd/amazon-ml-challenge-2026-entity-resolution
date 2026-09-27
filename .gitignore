@@ -11,3 +11,7 @@ outputs/*
 !**/.gitkeep
 logs/
 outputs/submissions/
+
+# large local artefacts and the organizers' package (never committed)
+data/work_v2/
+data/New Folder/
