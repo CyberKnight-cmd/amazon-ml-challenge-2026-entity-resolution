@@ -104,11 +104,59 @@ What is still missed, and why we accepted it:
 
 ## 3.8 `candidate_pairs.tsv` (one of the required deliverables)
 
-The organizers audit blocking quality using this file. `score_country(..., cand_dir=...)` can write every
-candidate pair (query id, entity id, evidence score) per chunk while scoring. The exact column layout the
-organizers expect is unspecified in the video; we assume `source1_entity_id<TAB>candidate_entity_id`. The size
-is large (≈ 28 pairs per query × 10 M queries), see `10_RUNNING_THE_PIPELINE.md` for how the final file is
-produced.
+The organizers audit blocking quality using this file (recall ceiling, reduction ratio). Their README fixes the
+layout: header `source1_entity_id<TAB>candidate_entity_ids`, **one row per test S1 entity**, a comma-separated list
+of S2/S3 ids (empty when there is none), and it must be the set the final model runs inference over, so every
+matched id is also a candidate. `stage2_apply.py` writes exactly that from the stage-2 input pairs, and the
+official `scripts/validate_submission.py` checks the subset rule.
 
-## 3.9 Hand-off
-The candidate list, together with the evidence numbers (`score`, `n_keys`, …), goes to **pair features** (05).
+## 3.9 Blocking v2: keys built around this dataset's noise generator
+
+**Code:** `src/entity_resolution/blocking_v2.py` · **Switch:** `ER_BLOCKING=v2` · **Tests:** `tests/test_blocking_v2.py`
+
+The keys above are generic: exact tokens, bigrams and prefixes, kept only when rare. Reading the matches they
+missed showed that almost every miss comes from one of a few corruptions that exact keys cannot see *by
+construction*:
+
+| Miss (S1 ⟷ query) | Why the v1 keys fail |
+|---|---|
+| `kiran industries private limited` ⟷ `private kiran industries limited` | reordered; every shared bigram is a common one and is capped away |
+| `bharat enterprises private limited` ⟷ same name, other address | common exact name; other candidates outscore it in the top 30 |
+| `urology health inc` ⟷ `urology health inc trading` (empty address) | one inserted word; single tokens and bigrams too common |
+| `martinez holding company llc` ⟷ `martinez holdig company llc` | one typo'd word |
+| `east consultancy …` ⟷ `east c0nsultancy …` | digit-for-letter typo |
+| `gallegos iheartmedia` ⟷ `gallegosiheartmedia` | glued name; its 8-letter prefix `gallegos` is shared by many entities |
+| `4211 roosevelt street` ⟷ `4210 roosevelt st` | house number edited; exact number keys never line up |
+
+The v2 keys invert these corruptions (details in the module docstring): a **name bag** of the distinct tokens
+with up to two deletions on each side (absorbs reordering, duplicated words, suffix swaps and one or two
+inserted/dropped/replaced words), its **anagram** (glued/domain/handle names, even reordered), a **fuzzy house
+number** (one digit deleted) × rare address word, **rare name token × rare address word**, **squashed-name prefix
+× rare address word**, and **single-typo** token variants. Before building keys, digits inside words are read as
+letters (`5afe` → `safe`) and every token is mapped to one spelling per alias class learned from the training
+pairs (ltd/limited, st/street/saint, texas/tx), on **both** sides. The alias table maps some pairs both ways
+(`ltd→limited` *and* `limited→ltd`), so it is turned into equivalence classes with a single canonical spelling;
+applying it one-way would just swap the two forms. Stopwords are each country's most frequent S1 name tokens
+(computed unsupervised, so France gets its own).
+
+v2 does not replace v1: candidates are the **v1 top 30 plus the v2 top 15**, and the matcher receives both
+evidence sets (`in_v1`, `in_v2`, `v2_score`, per-family counts; zeros where a blocker had none).
+
+Measured on train (100,000 sampled queries per country, seed 7, full S1 index; recall = true owner among
+candidates, denominator = every matched query):
+
+| Country | v1 recall | **v1 + v2 recall** | Candidates / query | v1 misses recovered |
+|---|---|---|---|---|
+| US | 98.44 % | **99.41 %** | 28.3 → 38.1 | ≈ 62 % |
+| India | 96.83 % | **98.52 %** | 29.4 → 39.9 | ≈ 53 % |
+
+Of the v1 misses, 65–74 % share a name-bag key with their true entity and 68–71 % an anagram key (US 757 and
+786 of 1,156; India 1,737 and 1,656 of 2,341; before the top-15 cut); house-number, cross and squash-prefix keys
+each add a smaller share that no other family reaches. What stays
+unreachable by any key is mostly **empty-address records with a common name** (US 187 of 214) and records whose
+name was **replaced by an unrelated trade name** while the address was also edited. Neither can be placed with
+precision, so they are not worth chasing.
+
+## 3.10 Hand-off
+The candidate list, together with the evidence numbers (`score`, `n_keys`, …, and in v2 mode `v2_*`), goes to
+**pair features** (05).

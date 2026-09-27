@@ -13,7 +13,8 @@ import lightgbm as lgb
 import polars as pl
 
 from .blocking import BlockingConfig, build_index, query_candidates
-from .dataset import load_alias_table, prep_queries
+from .blocking_v2 import build_v2_index, union_candidates
+from .dataset import blocking_mode, load_alias_table, prep_queries
 from .features import pair_features, prepare_s1
 from .io import WORK, load_normalized
 
@@ -49,12 +50,15 @@ def score_country(
     table = load_alias_table()
     t0 = time.time()
     index, s1s = build_index(s1, cfg), prepare_s1(s1)
-    log(f"[{split}/{country}] S1={s1.height:,} queries={rec.height:,} index built in {time.time()-t0:.0f}s")
+    v2 = build_v2_index(s1, table) if blocking_mode() == "v2" else None
+    log(f"[{split}/{country}] S1={s1.height:,} queries={rec.height:,} blocking={blocking_mode()} index built in {time.time()-t0:.0f}s")
     out, n_cand = [], 0
     for i in range(0, rec.height, chunk_q):
         t = time.time()
         q = prep_queries(rec.slice(i, chunk_q), table)
         cand = query_candidates(index, q)
+        if v2 is not None:
+            cand = union_candidates(v2, q, cand)
         if cand_dir is not None:
             cand_dir.mkdir(parents=True, exist_ok=True)
             cand.select("q_id", "s1_id", "score").write_parquet(cand_dir / f"{split}_{country}_{i // chunk_q:04d}.parquet", compression="zstd")

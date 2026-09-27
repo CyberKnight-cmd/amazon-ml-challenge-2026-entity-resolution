@@ -8,6 +8,7 @@ import polars as pl
 
 from .aliases import add_native_flags, apply_aliases
 from .blocking import BlockingConfig, generate_candidates
+from .blocking_v2 import build_v2_index, union_candidates
 from .features import pair_features, prepare_s1
 from .io import WORK, load_normalized, load_truth
 
@@ -17,6 +18,19 @@ N_FOLDS = 5
 def alias_mode() -> str:
     """Only cross-script (native) aliases help: Latin-to-Latin rewrites measurably hurt (see docs/PLAN.md)."""
     return os.environ.get("ER_ALIAS_MODE", "native")
+
+
+def blocking_mode() -> str:
+    """'v1' = blocking.py only; 'v2' = v1 candidates plus the generator-aware keys of blocking_v2.py."""
+    return os.environ.get("ER_BLOCKING", "v1")
+
+
+def candidates(s1: pl.DataFrame, q: pl.DataFrame, table: pl.DataFrame | None, cfg: BlockingConfig = BlockingConfig()) -> pl.DataFrame:
+    """Candidate pairs with blocking evidence for one country, in the configured blocking mode."""
+    cand = generate_candidates(s1, q, cfg)
+    if blocking_mode() == "v2":
+        cand = union_candidates(build_v2_index(s1, table), q, cand)
+    return cand
 
 
 def load_alias_table() -> pl.DataFrame | None:
@@ -36,10 +50,11 @@ def build_pair_table(country: str, n_queries: int, seed: int = 7, cfg: BlockingC
         compute features, and label each pair (1 = true owner). Also writes a per-query meta table incl. fold and truth."""
     s1 = load_normalized("train", 1).filter(pl.col("country") == country)
     rec = pl.concat([load_normalized("train", 2), load_normalized("train", 3)]).filter(pl.col("country") == country)
-    q = prep_queries(rec.sample(n_queries, seed=seed), load_alias_table())
+    table = load_alias_table()
+    q = prep_queries(rec.sample(n_queries, seed=seed), table)
     truth = load_truth("train").rename({"other": "q_id", "s1": "true_s1"})
 
-    cand = generate_candidates(s1, q, cfg)
+    cand = candidates(s1, q, table, cfg)
     feats = pair_features(cand, prepare_s1(s1), q)
     qt = q.select(pl.col("id").alias("q_id")).join(truth, on="q_id", how="left")
     # fold is a property of the *true entity* (distractors: of the query) so no entity spans train and validation
@@ -58,7 +73,8 @@ def cached_pair_table(country: str, n_queries: int, seed: int = 7) -> pl.DataFra
     """`build_pair_table` with an on-disk cache keyed by country, sample size, seed and alias mode."""
     WORK.mkdir(parents=True, exist_ok=True)
     mode = alias_mode()
-    path = WORK / f"pairs_{country}_{n_queries}_{seed}_{mode}.parquet"
+    blk = "" if blocking_mode() == "v1" else f"_{blocking_mode()}"
+    path = WORK / f"pairs_{country}_{n_queries}_{seed}_{mode}{blk}.parquet"
     if path.exists():
         return pl.read_parquet(path)
     WORK.mkdir(parents=True, exist_ok=True)

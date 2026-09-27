@@ -39,6 +39,7 @@ The fitted artifacts needed by steps 6–7 (matcher, alias table, calibrators, c
 |---|---|---|
 | `ER_WORK` | `data/interim` | Where fitted artifacts and scored tables are written/read |
 | `ER_ALIAS_MODE` | `native` | Which aliases are applied (`none`, `all`, `native_addr`, `native`) — see 04 |
+| `ER_BLOCKING` | `v1` | `v2` adds the generator-aware keys of `blocking_v2.py` to every blocking call (03, 3.9). A matcher trained in one mode must be used in the same mode (the v2 evidence columns are features). `scripts/run_v2_blocking.sh` rebuilds every stage in v2 mode into `data/work_v2/` |
 
 ## 10.4 Determinism
 Sampling uses fixed seeds; fold assignment is a hash of entity ids; LightGBM is seeded by default. Re-running a

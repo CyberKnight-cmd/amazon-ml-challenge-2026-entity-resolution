@@ -13,6 +13,9 @@ check, **not** the leaderboard metric (which is per entity; see 08).
 | 3 | + `h:` number×word keys; wider S1 side for `p:` keys | 98.35 % | 96.0 % | 28–29 | native-name recall 85 → 90 % |
 | 4 | + leading-zero removal, + `x:` sorted-address key | 98.45 % | 96.0 % | 28 | small gains |
 | 5 | + native aliases | 98.3 % | 96.4 % | 29 | blocking gain small; the big alias gain is in the matcher |
+| 6 | Baseline re-measured 27 Sep (same sample, aliases from `artifacts/`) | 98.44 % | 96.83 % | 28–29 | reference for row 7 |
+| 7 | **+ v2 generator-aware keys** (v1 top-30 ∪ v2 top-15; 03, 3.9) | **99.41 %** | **98.52 %** | 38–40 | recovers 53–62 % of v1 misses; v2 alone at top-30: 98.86 % / 97.23 % |
+| 7a | First v2 prototype, v1 ∪ v2 top-10 (names made only of frequent words skipped, no alias classes, out-of-vocabulary words allowed as "rare", no `sw` keys) | 99.18 % | – | 34 | the same union with the fixes of row 7: 99.35 % at 34 → fixes worth +0.17 pt (US) |
 
 ## 11.2 Matcher (record-level F0.5 on held-out fold)
 
@@ -76,7 +79,9 @@ recall, 35 k add only a wrong record), not false merges (see 08, 8.5.2).
 * **Looser blocking caps.** 2.14 % of true matches have no plausible candidate; ≈ 55 % of those are non-empty, non-native records that
   blocking dropped because a key exceeded its frequency cap. The experiment (`eval_blocking.py --key_cap 100/250 --bigram_cap 400/800
   --pair_cap 300/600`) was started but interrupted by a session end, so **no result exists yet**. It is the most promising recall lever.
-* Character-level fuzzy blocking keys (e.g. deletion neighbourhoods) for typos in the only informative token.
+* ~~Character-level fuzzy blocking keys (e.g. deletion neighbourhoods) for typos in the only informative token.~~
+  Done as part of blocking v2 (row 7 of 11.1), together with token-level deletion neighbourhoods, which turned
+  out to matter far more than character-level ones.
 * Word segmentation of glued names (`mediajayaindia` → `media jaya india`) using the learned vocabulary.
 * Entity-context second-stage features (how consistent an entity's S2 and S3 records are with each other).
 * Transductive self-training for France (see 09).
