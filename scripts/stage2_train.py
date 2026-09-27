@@ -26,10 +26,17 @@ ap.add_argument("--final", action="store_true", help="train on everything and sa
 ap.add_argument("--final_rounds", type=int, default=0, help="rounds for --final (default: best iteration of eval run)")
 ap.add_argument("--no_channel", action="store_true")
 ap.add_argument("--tag", default="")
+ap.add_argument("--drop", nargs="*", default=[], help="feature columns (or prefixes ending in *) to leave out, for ablations")
+ap.add_argument("--no_sc", action="store_true", help="ablation: remove sibling-found pairs (sc_new=1) and the sc_* features")
+ap.add_argument("--ce", action="store_true", help="add the cross-encoder score (ce_train_<country>.parquet) as a feature and "
+                "leave out the rows the cross-encoder was fine-tuned on")
 a = ap.parse_args()
 t0 = time.time()
 
 df = pl.concat([pl.read_parquet(WORK / f"s2_train_{c}.parquet") for c in a.countries], how="diagonal_relaxed")
+if a.no_sc and "sc_new" in df.columns:
+    df = df.filter(pl.col("sc_new") == 0)
+    a.drop = [*a.drop, "sc_*"]
 truth = load_truth("train")
 qtrue = truth.rename({"other": "q_id", "s1": "true_s1"})
 half = lambda col, seed=99: (pl.col(col).hash(seed=seed) % 2)  # noqa: E731
@@ -39,6 +46,13 @@ df = df.join(qtrue, on="q_id", how="left").with_columns(
     pl.coalesce("true_s1", pl.col("s1_id").filter(pl.col("q_rank") == 0).first().over("q_id")).alias("grp"),
 )
 df = df.with_columns(half("grp").alias("half"), (pl.col("grp").hash(seed=5) % 4).cast(pl.Int32).alias("f4"))
+if a.ce:
+    from entity_resolution.cross_encoder import ce_train_rows
+
+    ce = pl.concat([pl.read_parquet(WORK / f"ce_train_{c}.parquet") for c in a.countries])
+    n0 = df.height
+    df = df.filter(~ce_train_rows()).join(ce, on=["q_id", "s1_id"], how="left")
+    print(f"cross-encoder: {ce.height:,} scored pairs; left out {n0 - df.height:,} fine-tuning rows", flush=True)
 print(f"pairs={df.height:,} positives={df['y'].sum():,} ({time.time() - t0:.0f}s)", flush=True)
 
 fit_rows = df if a.final else df.filter(pl.col("half") == 0)
@@ -66,7 +80,8 @@ if not a.no_channel:
     print(f"channel features done ({time.time() - t0:.0f}s)", flush=True)
 
 drop = {"q_id", "s1_id", "n1", "a1", "n2", "a2", "true_s1", "y", "grp", "half", "f4"}
-feats = [c for c in df.columns if c not in drop]
+feats = [c for c in df.columns if c not in drop and not any(c == x or (x.endswith("*") and c.startswith(x[:-1])) for x in a.drop)]
+print(f"{len(feats)} features" + (f" (dropped {a.drop})" if a.drop else ""), flush=True)
 X = lambda d: d.select(pl.col(feats).cast(pl.Float32)).to_numpy()  # noqa: E731
 
 if a.final:

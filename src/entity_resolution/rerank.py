@@ -10,6 +10,9 @@ its p >= 0.02 cut, so stage 2 can afford features that would be too slow for eve
   * how common the query's leftover name words are among S1 names (a real word substituted for a real word is a
     decoy signature; an unknown string is a typo or an invented trade name);
   * house-number relations (absolute difference, prefix/truncation);
+  * sibling agreement: whether the query repeats the rare divergences from S1 (numbers, uncommon words) that the
+    entity's other confident records share - the generator noises each source's copies from one per-source
+    variant, which decoys built from S1 lack (sibling_features);
   * the plain text similarities of features.py (recomputed; blocking statistics are summarised by stage-1 p).
 """
 
@@ -131,6 +134,121 @@ def base_frame(scored: pl.DataFrame, s1s: pl.DataFrame, queries: pl.DataFrame) -
         (pl.col("id").str.slice(1, 1) == "3").cast(pl.Float32).alias("src"),
     )
     return s.join(s1s, on="s1_id").join(qs, on="q_id")
+
+
+SIB_P, SIB_COMMON_DF, SIB_CHUNKS = 0.9, 50, 8
+SIB_COLS = ("q_addr_rdiv", "sib_addr_shared", "sib_addr_shared_same", "q_name_rdiv", "sib_name_shared")
+
+
+def sibling_features(b: pl.DataFrame, s1: pl.DataFrame) -> pl.DataFrame:
+    """Does the query repeat the entity's *per-source* variant? One row per (q_id, s1_id) of the base frame.
+
+    Each source's copies of an entity are noised from one shared variant (an S3 house number 4210 where S1 says
+    4211, an added locality, 'Hn 323'), so a genuine record tends to share its rare divergences from S1 with the
+    entity's other confident records, while a decoy built from S1 does not (measured: 54 % vs 7 % of hard pairs).
+    A rare divergence is a query token absent from S1's text that is a number or a word used by at most
+    SIB_COMMON_DF S1 entities of the country. Siblings are the other queries whose stage-1 winner is the entity
+    with p >= SIB_P (no labels involved)."""
+    tok = lambda c: pl.col(c).str.split(" ")  # noqa: E731
+    adf = s1.select("id", tok("addr_n").alias("t")).explode("t").unique().group_by("t").agg(pl.len().alias("df"))
+    ndf = s1.select("id", tok("name_n").alias("t")).explode("t").unique().group_by("t").agg(pl.len().alias("df"))
+    a_common = adf.filter((pl.col("df") > SIB_COMMON_DF) & ~pl.col("t").str.contains(r"\d")).select("t")
+    n_common = ndf.filter(pl.col("df") > SIB_COMMON_DF).select("t")
+    base = b.select(
+        pl.int_range(pl.len()).alias("_r"), "q_id", "s1_id", "p", "q_rank", "src3",
+        tok("a2").list.set_difference(tok("a1")).alias("_a"), tok("n2").list.set_difference(tok("n1")).alias("_n"),
+    )
+
+    def rare(col: str, common: pl.DataFrame, name: str) -> pl.DataFrame:
+        """Per row: the divergent tokens of `col` minus the country's common tokens (rows without any are absent)."""
+        return (
+            base.select("_r", pl.col(col).alias("t")).explode("t").filter(pl.col("t").is_not_null() & (pl.col("t") != ""))
+            .join(common, on="t", how="anti").group_by("_r").agg(pl.col("t").alias(name))
+        )
+
+    rows = base.drop("_a", "_n").join(rare("_a", a_common, "ard"), on="_r", how="left").join(rare("_n", n_common, "nrd"), on="_r", how="left")
+    out = []
+    for k in range(SIB_CHUNKS):
+        r = rows.filter(pl.col("s1_id").hash(seed=11) % SIB_CHUNKS == k)
+        sib = r.filter((pl.col("q_rank") == 0) & (pl.col("p") >= SIB_P)).select(
+            "s1_id", pl.col("q_id").alias("sq"), pl.col("src3").alias("ssrc"), pl.col("ard").alias("sard"), pl.col("nrd").alias("snrd"))
+        x = (
+            r.filter((pl.col("ard").list.len() > 0) | (pl.col("nrd").list.len() > 0))
+            .select("q_id", "s1_id", "src3", "ard", "nrd").join(sib, on="s1_id").filter(pl.col("sq") != pl.col("q_id"))
+            .with_columns(pl.col("ard").list.set_intersection("sard").list.len().alias("_as"),
+                          pl.col("nrd").list.set_intersection("snrd").list.len().alias("_ns"),
+                          (pl.col("ssrc") == pl.col("src3")).alias("_same"))
+            .group_by("q_id", "s1_id").agg(
+                pl.col("_as").max().alias("sib_addr_shared"),
+                pl.col("_as").filter(pl.col("_same")).max().alias("sib_addr_shared_same"),
+                pl.col("_ns").max().alias("sib_name_shared"))
+        )
+        out.append(r.select("q_id", "s1_id", pl.col("ard").list.len().fill_null(0).alias("q_addr_rdiv"),
+                            pl.col("nrd").list.len().fill_null(0).alias("q_name_rdiv"))
+                   .join(x, on=["q_id", "s1_id"], how="left"))
+    res = pl.concat(out)
+    return res.with_columns(pl.col(c).fill_null(0).cast(pl.Float32) for c in SIB_COLS)
+
+
+SC_P, SC_MAX_ENTITIES, SC_MAX_QUERIES, SC_PER_QUERY = 0.9, 2, 20, 3
+
+
+def _sc_keys(q: pl.DataFrame) -> pl.DataFrame:
+    """Address-variant keys of queries (q_id, src, key): the sorted token bag (>= 3 tokens incl. a number) and
+    house-number x rarest-word pairs (number runs of >= 2 digits x the 2 rarest non-numeric words, rarity counted
+    over the queries themselves, so variant spellings absent from S1 - 'candall', 'coloraado' - still count)."""
+    tok = pl.col("addr_n").str.split(" ")
+    base = q.select("q_id", pl.col("q_id").str.slice(0, 2).alias("src"), "addr_n").filter(pl.col("addr_n") != "")
+    wdf = base.select("q_id", tok.alias("t")).explode("t").filter(pl.col("t") != "").unique().group_by("t").agg(pl.len().alias("wdf"))
+    bag = base.filter((tok.list.len() >= 3) & pl.col("addr_n").str.contains(r"\d")).select(
+        "q_id", "src", (pl.lit("b:") + tok.list.sort().list.join(" ")).alias("key"))
+    words = (
+        base.select("q_id", tok.alias("t")).explode("t").filter((pl.col("t") != "") & ~pl.col("t").str.contains(r"\d"))
+        .unique().join(wdf, on="t").sort(["q_id", "wdf", "t"]).group_by("q_id", maintain_order=True).head(2)
+        .select("q_id", "t")
+    )
+    nums = (
+        base.select("q_id", pl.col("addr_n").str.extract_all(r"\d+").alias("n")).explode("n").drop_nulls("n")
+        .with_columns(pl.col("n").str.strip_chars_start("0")).filter(pl.col("n").str.len_chars() >= 2).unique()
+    )
+    hn = nums.join(words, on="q_id").join(base.select("q_id", "src"), on="q_id").select(
+        "q_id", "src", (pl.lit("h:") + pl.col("n") + "|" + pl.col("t")).alias("key"))
+    return pl.concat([bag, hn])
+
+
+def sibling_candidates(scored: pl.DataFrame, queries: pl.DataFrame) -> pl.DataFrame:
+    """Candidate pairs found through siblings instead of S1: (q_id, s1_id, sc_n, sc_keys).
+
+    Each source's copies of an entity share one address variant, which can differ from S1 by a new house number,
+    city or truncation. So a record that cannot be found from S1 can still be found from a same-source record
+    already placed with stage-1 p >= SC_P: if they share an address-variant key (a key carried by at most
+    SC_MAX_QUERIES records of the source and SC_MAX_ENTITIES entities among the placed ones), the placed record's
+    entity becomes a candidate. Returns every such pair, including ones stage 1 already had (sc_n is then a
+    feature), at most SC_PER_QUERY entities per query, ranked by the number of distinct matching siblings.
+    No labels involved."""
+    best = scored.sort(["q_id", "p"], descending=[False, True]).group_by("q_id", maintain_order=True).first()
+    placed = best.filter(pl.col("p") >= SC_P).select(pl.col("q_id").alias("sq"), "s1_id")
+    keys = _sc_keys(queries.select(pl.col("id").alias("q_id"), "addr_n"))
+    keys = keys.join(keys.group_by("src", "key").agg(pl.len().alias("_nq")).filter(pl.col("_nq") <= SC_MAX_QUERIES)
+                     .select("src", "key"), on=["src", "key"])
+    sk = keys.join(placed, left_on="q_id", right_on="sq").rename({"q_id": "sq"})
+    ok = sk.group_by("src", "key").agg(pl.col("s1_id").n_unique().alias("_ne")).filter(pl.col("_ne") <= SC_MAX_ENTITIES)
+    sk = sk.join(ok.select("src", "key"), on=["src", "key"])
+    pairs = keys.join(sk, on=["src", "key"]).filter(pl.col("q_id") != pl.col("sq"))
+    return (
+        pairs.group_by("q_id", "s1_id").agg(pl.col("sq").n_unique().alias("sc_n"), pl.col("key").n_unique().alias("sc_keys"))
+        .sort(["q_id", "sc_n", "sc_keys"], descending=[False, True, True]).group_by("q_id", maintain_order=True).head(SC_PER_QUERY)
+        .with_columns(pl.col("sc_n", "sc_keys").cast(pl.Float32))
+    )
+
+
+def add_sibling_candidates(scored: pl.DataFrame, sc: pl.DataFrame) -> pl.DataFrame:
+    """Stage-1 pairs plus sibling-found pairs (p = 0 for pairs stage 1 never scored); flags sc_new, features sc_n/sc_keys."""
+    old = scored.join(sc, on=["q_id", "s1_id"], how="left").with_columns(pl.lit(0.0, dtype=pl.Float32).alias("sc_new"))
+    new = sc.join(scored.select("q_id", "s1_id"), on=["q_id", "s1_id"], how="anti").with_columns(
+        pl.lit(0.0, dtype=scored["p"].dtype).alias("p"), pl.lit(1.0, dtype=pl.Float32).alias("sc_new"))
+    out = pl.concat([old, new.select(old.columns)], how="vertical_relaxed")
+    return out.with_columns(pl.col("sc_n", "sc_keys").fill_null(0.0))
 
 
 def text_features(b: pl.DataFrame, vocab: pl.DataFrame) -> pl.DataFrame:
