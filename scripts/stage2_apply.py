@@ -23,6 +23,7 @@ ap.add_argument("--unseen_tau", type=float, default=None, help="stricter thresho
 ap.add_argument("--out", default=str(ROOT / "outputs" / "submission" / "matching_results.tsv"))
 ap.add_argument("--cand_out", default=str(ROOT / "outputs" / "submission" / "candidate_pairs.tsv"))
 ap.add_argument("--ce", action="store_true", help="join the cross-encoder scores ce_test_<country>.parquet (model trained with --ce)")
+ap.add_argument("--ce_all", action="store_true", help="with --ce: also the confident pairs' scores (model trained with --ce_all)")
 a = ap.parse_args()
 
 model = lgb.Booster(model_file=str(WORK / f"s2_model{a.tag}.txt"))
@@ -40,7 +41,8 @@ acc_all, best_all = [], {}
 for c in countries:
     df = pl.read_parquet(WORK / f"s2_test_{c}.parquet")
     if a.ce:
-        df = df.join(pl.read_parquet(WORK / f"ce_test_{c}.parquet"), on=["q_id", "s1_id"], how="left")
+        parts = [f"ce_test_{c}.parquet"] + ([f"ce_test_{c}_easy.parquet"] if a.ce_all else [])
+        df = df.join(pl.concat([pl.read_parquet(WORK / f) for f in parts]), on=["q_id", "s1_id"], how="left")
     cand_all.append(df.select("q_id", "s1_id"))  # exactly the pairs the final model runs inference over
     if tables is not None:
         ch = channel.features(df["n1"].to_list(), df["n2"].to_list(), df["a1"].to_list(), df["a2"].to_list(), tables)

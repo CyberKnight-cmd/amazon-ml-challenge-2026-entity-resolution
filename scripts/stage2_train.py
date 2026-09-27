@@ -30,6 +30,7 @@ ap.add_argument("--drop", nargs="*", default=[], help="feature columns (or prefi
 ap.add_argument("--no_sc", action="store_true", help="ablation: remove sibling-found pairs (sc_new=1) and the sc_* features")
 ap.add_argument("--ce", action="store_true", help="add the cross-encoder score (ce_train_<country>.parquet) as a feature and "
                 "leave out the rows the cross-encoder was fine-tuned on")
+ap.add_argument("--ce_all", action="store_true", help="with --ce: also the scores of the confident pairs (ce_train_<c>_easy.parquet)")
 a = ap.parse_args()
 t0 = time.time()
 
@@ -49,7 +50,8 @@ df = df.with_columns(half("grp").alias("half"), (pl.col("grp").hash(seed=5) % 4)
 if a.ce:
     from entity_resolution.cross_encoder import ce_train_rows
 
-    ce = pl.concat([pl.read_parquet(WORK / f"ce_train_{c}.parquet") for c in a.countries])
+    parts = [f"ce_train_{c}.parquet" for c in a.countries] + ([f"ce_train_{c}_easy.parquet" for c in a.countries] if a.ce_all else [])
+    ce = pl.concat([pl.read_parquet(WORK / f) for f in parts])
     n0 = df.height
     df = df.filter(~ce_train_rows()).join(ce, on=["q_id", "s1_id"], how="left")
     print(f"cross-encoder: {ce.height:,} scored pairs; left out {n0 - df.height:,} fine-tuning rows", flush=True)
