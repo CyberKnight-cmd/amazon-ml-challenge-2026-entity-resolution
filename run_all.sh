@@ -8,7 +8,7 @@ export ER_WORK=${ER_WORK:-data/work} ER_BLOCKING=v2
 mkdir -p "$ER_WORK" output
 
 if [ "${SMOKE:-0}" = 1 ]; then
-    N=20000; ROUNDS=60; LIMIT=(--limit_queries 20000); CE=(--max_train 5000 --n_val 2000); EPOCHS=1
+    N=20000; ROUNDS=60; LIMIT=(--limit_queries 20000 --tag full); CE=(--max_train 5000 --n_val 2000); EPOCHS=1
 else
     N=250000; ROUNDS=600; LIMIT=(); CE=(--max_train 400000); EPOCHS=3
 fi
