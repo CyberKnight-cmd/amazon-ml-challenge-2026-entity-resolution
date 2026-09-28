@@ -1,9 +1,9 @@
 """Fine-tune the cross-encoder on hard stage-2 pairs of the train world and report a go/no-go check.
 
-Reads s2_train_<country>.parquet from --src (any stage-2 build; only ids, p, q_rank and the four texts are used),
+Reads s2_train_<country>.parquet from --src (default $ER_WORK; only ids, p, q_rank and the four texts are used),
 keeps the uncertain pairs (stage-1 p <= HARD_P), fine-tunes on the rows selected by ce_train_rows() and compares
 the cross-encoder with stage-1 p on a sample of half-B hard pairs (never used for fine-tuning).
-    uv run python scripts/ce_train.py --src data/processed --max_train 600000
+    python scripts/ce_train.py --max_train 400000
 """
 import argparse
 import time
@@ -17,7 +17,7 @@ from entity_resolution.cross_encoder import HARD_P, ce_train_rows, score_ce, tra
 from entity_resolution.io import WORK, load_truth
 
 ap = argparse.ArgumentParser()
-ap.add_argument("--src", default="data/processed")
+ap.add_argument("--src", default=None, help="folder with s2_train_*.parquet (default: $ER_WORK)")
 ap.add_argument("--countries", nargs="+", default=["US", "India"])
 ap.add_argument("--max_train", type=int, default=600_000)
 ap.add_argument("--n_val", type=int, default=60_000)
@@ -29,7 +29,8 @@ a = ap.parse_args()
 t0 = time.time()
 
 cols = ["q_id", "s1_id", "p", "q_rank", "n1", "a1", "n2", "a2"]
-df = pl.concat([pl.scan_parquet(Path(a.src) / f"s2_train_{c}.parquet").select(cols).filter(pl.col("p") <= HARD_P).collect()
+src = Path(a.src) if a.src else WORK
+df = pl.concat([pl.scan_parquet(src / f"s2_train_{c}.parquet").select(cols).filter(pl.col("p") <= HARD_P).collect()
                 for c in a.countries])
 truth = load_truth("train").rename({"other": "q_id", "s1": "true_s1"})
 df = df.join(truth, on="q_id", how="left").with_columns(
