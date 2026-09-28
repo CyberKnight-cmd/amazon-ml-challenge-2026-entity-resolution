@@ -66,7 +66,11 @@ def load_normalized(split: str, source: int, refresh: bool = False) -> pl.DataFr
 
 
 def load_truth(split: str = "train") -> pl.DataFrame:
-    """Long-format ground truth: one row per (s1, matched id)."""
+    """Long-format ground truth: one row per (s1, matched id). Pseudo-splits (validation worlds, see
+    scripts/build_worlds.py) keep theirs in data/interim/<split>_truth.parquet."""
+    cached = INTERIM / f"{split}_truth.parquet"
+    if cached.exists():
+        return pl.read_parquet(cached)
     gt = read_tsv(raw_path(split, "ground_truth"))
     return (
         gt.filter(pl.col("matched_entity_ids") != "")

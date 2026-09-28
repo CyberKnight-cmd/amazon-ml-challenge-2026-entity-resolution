@@ -8,6 +8,8 @@ import polars as pl
 from rapidfuzz import fuzz, process
 from rapidfuzz.distance import JaroWinkler, Levenshtein
 
+from .blocking_v2 import EVIDENCE_COLS
+
 CHUNK = 1_500_000
 
 _NAME_SCORERS = {
@@ -81,6 +83,7 @@ def _chunk_features(p: pl.DataFrame) -> pl.DataFrame:
         "q_id", "s1_id",
         "n_keys", "score", "max_idf", "k_name", "k_addr", "k_bigram", "k_sq", "k_pair", "k_numpair", "k_addrbag",
         "s1_name_dup", "s1_addr_dup", "src",
+        *[c for c in EVIDENCE_COLS if c in p.columns],
         pl.col("d2").cast(pl.Float32).alias("q_is_domain"),
         (pl.col("a2") == "").cast(pl.Float32).alias("q_addr_empty"),
         (pl.col("n1") == pl.col("n2")).cast(pl.Float32).alias("n_exact"),

@@ -13,6 +13,9 @@ dependencies = [
     "polars",
     "pyarrow",
     "tqdm",
+    "torch",
+    "transformers",
+    "accelerate",
 ]
 
 [dependency-groups]

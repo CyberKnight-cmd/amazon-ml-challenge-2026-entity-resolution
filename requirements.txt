@@ -1,0 +1,16 @@
+# Python 3.12. Install:  pip install -r requirements.txt && pip install -e .
+# torch's Linux wheels on PyPI include CUDA (the cross-encoder needs a CUDA GPU).
+
+numpy==2.5.3
+pandas==3.0.6
+scipy==1.18.1
+scikit-learn==1.9.1
+pyarrow==25.0.1
+polars==1.44.2
+rapidfuzz==3.14.6
+lightgbm==4.7.0
+tqdm==4.70.1
+torch==2.11.0
+transformers==5.17.0
+accelerate==1.15.0
+pytest==9.1.1

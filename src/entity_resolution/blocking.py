@@ -24,6 +24,7 @@ class BlockingConfig:
     min_sq_len: int = 6
     addr_pair_tokens: int = 5  # rarest address tokens used to build pair keys (query side)
     addr_pair_tokens_s1: int = 7  # wider on the S1 side: queries may keep only S1's *common* tokens
+    cross_cap: int = 0         # name-token x address-word keys ("family|cookeville"); 0 disables them
 
 
 def _explode_tokens(df: pl.DataFrame, col: str, tag: str) -> pl.DataFrame:
@@ -54,6 +55,16 @@ def _squash_key(df: pl.DataFrame, cfg: BlockingConfig) -> pl.DataFrame:
     return df.filter(pl.col("name_sq").str.len_chars() >= cfg.min_sq_len).select(
         "row", (pl.lit("q:") + pl.col("name_sq").str.slice(0, cfg.sq_prefix)).alias("key")
     )
+
+
+def _cross(df: pl.DataFrame) -> pl.DataFrame:
+    """(name token, address word) pairs: a common name plus a common town is still a selective combination."""
+    n = df.select("row", pl.col("name_n").str.split(" ").alias("n")).explode("n").filter(pl.col("n") != "").unique()
+    a = (
+        df.select("row", pl.col("addr_n").str.split(" ").alias("a")).explode("a")
+        .filter((pl.col("a") != "") & ~pl.col("a").str.contains(r"\d")).unique()
+    )
+    return n.join(a, on="row").select("row", (pl.lit("c:") + pl.col("n") + pl.lit("|") + pl.col("a")).alias("key"))
 
 
 def _addr_bag(df: pl.DataFrame) -> pl.DataFrame:
@@ -103,8 +114,9 @@ def build_keys(df: pl.DataFrame, tok_df: pl.DataFrame, cfg: BlockingConfig, n_pa
     """All blocking keys of a record set (token, bigram, squash, rare-address-pair, number-word, address-bag).
     
         `n_pair_tokens` = how many of the record's rarest address tokens feed the pair keys (wider on the S1 side)."""
+    parts = [_cross(df)] if cfg.cross_cap else []
     return pl.concat(
-        [
+        parts + [
             _explode_tokens(df, "name_n", "n"),
             _explode_tokens(df, "addr_n", "a"),
             _name_bigrams(df),
@@ -145,7 +157,7 @@ def build_index(s1: pl.DataFrame, cfg: BlockingConfig = BlockingConfig()) -> Blo
     tok_df = addr_token_df(s1)
     k1 = build_keys(s1, tok_df, cfg, cfg.addr_pair_tokens_s1)
     df = k1.group_by("key").agg(pl.len().alias("df"))
-    caps = {"n": cfg.key_cap, "a": cfg.key_cap, "b": cfg.bigram_cap, "q": cfg.bigram_cap, "p": cfg.pair_cap, "h": cfg.pair_cap, "x": cfg.bigram_cap}
+    caps = {"n": cfg.key_cap, "a": cfg.key_cap, "b": cfg.bigram_cap, "q": cfg.bigram_cap, "p": cfg.pair_cap, "h": cfg.pair_cap, "x": cfg.bigram_cap, "c": cfg.cross_cap}
     k1 = (
         k1.join(df, on="key")
         .with_columns(pl.col("key").str.slice(0, 1).replace_strict(caps, return_dtype=pl.Int64).alias("cap"))
@@ -175,6 +187,7 @@ def query_candidates(index: BlockIndex, queries: pl.DataFrame) -> pl.DataFrame:
             (pl.col("kt") == "p").sum().alias("k_pair"),
             (pl.col("kt") == "h").sum().alias("k_numpair"),
             (pl.col("kt") == "x").sum().alias("k_addrbag"),
+            (pl.col("kt") == "c").sum().alias("k_cross"),
         )
         .sort(["row", "score"], descending=[False, True])
         .group_by("row", maintain_order=True)
